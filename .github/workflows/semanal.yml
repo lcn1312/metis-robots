@@ -1,0 +1,95 @@
+name: Semanal — propostas, proponentes, incentivadores + snapshot
+
+# Domingo 03:00 BRT. Fatiado por offset para nenhum job passar de 6h. Cada job
+# roda num runner (IP) diferente; o teto da API SALIC é por IP, então 3 em
+# paralelo rendem mais sem derrubar a API (acima de ~6 conexões ela entra em 503).
+
+on:
+  schedule:
+    - cron: "0 6 * * 0" # domingo 06:00 UTC = 03:00 BRT
+  workflow_dispatch: {}
+
+concurrency:
+  group: semanal
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  SALIC_PAGE_SIZE: "100"
+  SALIC_TIMEOUT: "90"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  core:
+    name: ingest ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - { name: incentivadores,  resource: incentivadores, start: 0,      max: 0 }
+          - { name: proponentes-0,   resource: proponentes,    start: 0,      max: 25000 }
+          - { name: proponentes-1,   resource: proponentes,    start: 25000,  max: 25000 }
+          - { name: proponentes-2,   resource: proponentes,    start: 50000,  max: 0 }
+          - { name: propostas-0,     resource: propostas,      start: 0,      max: 75000 }
+          - { name: propostas-1,     resource: propostas,      start: 75000,  max: 75000 }
+          - { name: propostas-2,     resource: propostas,      start: 150000, max: 75000 }
+          - { name: propostas-3,     resource: propostas,      start: 225000, max: 75000 }
+          - { name: propostas-4,     resource: propostas,      start: 300000, max: 75000 }
+          - { name: propostas-5,     resource: propostas,      start: 375000, max: 0 }
+    env:
+      START_OFFSET: ${{ matrix.start }}
+      SALIC_MAX_RECORDS: ${{ matrix.max }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - name: Ingest ${{ matrix.name }}
+        run: python -m ingest.run ${{ matrix.resource }}
+
+  followups:
+    # Extras + doações detalhadas. Auto-retomáveis; uma fonte lenta não derruba as outras.
+    needs: core
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - name: Extras (PNAB, LPG, Afro, Bolsas, Prêmio)
+        continue-on-error: true
+        run: python -m ingest.extras
+      - name: Doações detalhadas (rodada limitada, retoma via cache)
+        continue-on-error: true
+        run: python -m ingest.incentivador_doacoes --limit 12000 --rps 2
+
+  snapshot:
+    needs: [core, followups]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Snapshot do painel
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "
+            INSERT INTO metis.weekly_snapshot (
+              taken_at, projetos, propostas, proponentes, incentivadores, fornecedores,
+              projeto_incentivador, projeto_fornecedor,
+              valor_aprovado_total, valor_captado_total, cnpj_cache, salic_fetch_cache
+            ) SELECT now(),
+              (SELECT count(*) FROM salic.projetos),
+              (SELECT count(*) FROM salic.propostas),
+              (SELECT count(*) FROM salic.proponentes),
+              (SELECT count(*) FROM salic.incentivadores),
+              (SELECT count(*) FROM salic.fornecedores),
+              (SELECT count(*) FROM salic.projeto_incentivador),
+              (SELECT count(*) FROM salic.projeto_fornecedor),
+              COALESCE((SELECT sum(valor_aprovado) FROM salic.projetos),0),
+              COALESCE((SELECT sum(valor_captado) FROM salic.projetos),0),
+              COALESCE((SELECT count(*) FROM metis.cnpj_cache),0),
+              COALESCE((SELECT count(*) FROM metis.salic_fetch_cache),0)"

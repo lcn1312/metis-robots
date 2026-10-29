@@ -1,0 +1,25 @@
+name: setup
+description: Python + deps + mascara o host do banco nos logs (repo é público)
+runs:
+  using: composite
+  steps:
+    - name: Mask DB host
+      shell: bash
+      run: |
+        host=$(python3 -c "import os,urllib.parse as u;print(u.urlparse(os.environ['DATABASE_URL']).hostname or '')")
+        if [ "$host" != "" ]; then
+          echo "::add-mask::$host"
+          echo "::add-mask::${host/-pooler/}"
+        fi
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.14"
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/pip
+        key: pip-${{ hashFiles('ingest/requirements.txt') }}
+    - name: Install deps
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r ingest/requirements.txt

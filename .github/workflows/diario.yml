@@ -1,0 +1,78 @@
+name: Diário — projetos + match + vínculos incrementais
+
+# 04:00 BRT. projetos (~20min) marca updated_at nos PRONACs que mudaram; o
+# incremental usa isso para re-vincular incentivadores/fornecedores só deles.
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC = 04:00 BRT
+  workflow_dispatch:
+    inputs:
+      budget_min:
+        description: "Teto de tempo do incremental (min)"
+        required: false
+        default: "240"
+
+concurrency:
+  group: diario
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  HEALTHCHECK_URL_SALIC_INCREMENTAL: ${{ secrets.HEALTHCHECK_URL_SALIC_INCREMENTAL }}
+  SALIC_PAGE_SIZE: "100"
+  SALIC_TIMEOUT: "90"
+  SALIC_TIMEOUT_READ: "240"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  projetos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - name: Ingest projetos
+        run: python -m ingest.run projetos
+
+  match:
+    needs: projetos
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - name: Build match_captacao
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f scripts/match_captacao_build.sql
+      - name: Sanity check
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
+            "SELECT (SELECT COUNT(*) FROM metis.match_captacao) AS matches,
+                    (SELECT COUNT(*) FROM metis.match_captacao_projeto) AS projetos,
+                    (SELECT MAX(generated_at) FROM metis.match_captacao_projeto) AS generated_at"
+
+  incremental:
+    needs: projetos
+    if: ${{ needs.projetos.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      # state.json guarda o rodízio de PRONACs já visitados entre execuções.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: data/incr/state.json
+          key: incr-state-${{ github.run_id }}
+          restore-keys: incr-state-
+      - name: Incremental de vínculos
+        run: python scripts/salic_incremental.py run --apply --budget-min "${{ inputs.budget_min || '240' }}"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: always()
+        with:
+          path: data/incr/state.json
+          key: incr-state-${{ github.run_id }}

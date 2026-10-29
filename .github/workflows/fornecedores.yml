@@ -1,0 +1,49 @@
+name: Quinzenal — fornecedores
+
+# Dias 1 e 16, 02:00 BRT. Recurso mais lento (~430k linhas, ~33h numa conexão só).
+# 8 fatias em runners distintos, 3 por vez.
+
+on:
+  schedule:
+    - cron: "0 5 1,16 * *" # 05:00 UTC = 02:00 BRT
+  workflow_dispatch: {}
+
+concurrency:
+  group: fornecedores
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  SALIC_PAGE_SIZE: "100"
+  SALIC_TIMEOUT: "240"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  fornecedores:
+    name: ingest ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - { name: fornecedores-0, start: 0,      max: 55000 }
+          - { name: fornecedores-1, start: 55000,  max: 55000 }
+          - { name: fornecedores-2, start: 110000, max: 55000 }
+          - { name: fornecedores-3, start: 165000, max: 55000 }
+          - { name: fornecedores-4, start: 220000, max: 55000 }
+          - { name: fornecedores-5, start: 275000, max: 55000 }
+          - { name: fornecedores-6, start: 330000, max: 55000 }
+          - { name: fornecedores-7, start: 385000, max: 0 }
+    env:
+      START_OFFSET: ${{ matrix.start }}
+      SALIC_MAX_RECORDS: ${{ matrix.max }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - name: Ingest ${{ matrix.name }}
+        run: python -m ingest.run fornecedores
